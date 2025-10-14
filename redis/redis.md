@@ -114,33 +114,60 @@ bitfield kq incrby u4 2 1.
 
 ### 持久化
 #### rdb
+redis的默认持久化方式
 redis.conf   set seconds changes. # 时间间隔、修改次数
 save(阻塞主任务) / bgsave 手动触发
 lastsave 获取上次快照时间
 shutdown、flushdb、flushall 会自动生成快照，flush类操作生成的空rdb文件
 利于备份和快速恢复大规模数据，但是数据量太大时rdb备份会比较消耗性能
-禁用rdb， redis.conf ->  save "", 或执行命令 config set save ""
-stop-writes-on-bgsave-error yes # 快照写入失败时，不接受写入请求
-rdbcompression yes # rdb 采用LZF算法压缩存储
-rdbchecksum yes # 存储快照后，使用crc64进行数据校验，会增加性能消耗
-rdb-del-sync-files no  # 没有配置持久化，是否删除主从复制的rdb文件
+redis.conf:
+    save "" # 禁用rdb, 或执行命令 config set save ""
+    stop-writes-on-bgsave-error yes # 快照写入失败时，不接受写入请求
+    rdbcompression yes # rdb 采用LZF算法压缩存储
+    rdbchecksum yes # 存储快照后，使用crc64进行数据校验，会增加性能消耗
+    rdb-del-sync-files no  # 没有配置持久化，是否删除主从复制的rdb文件
+
+优点：生成文件是二进制压缩格式，体积小，便于传输和备份、数据恢复速度快、适合全量备份
+缺点：可能丢失两次快照之间的数据，由于bgsave是fork的子进程做快照，如果数据量特别大，可能影响主进程
 
 #### aof
 记录写操作，默认不开启aof
-appendonly yes # redis.conf, 输出appendonly.aof 文件
-写回策略： appendfsync always/everysec/no 
-always 同步写回，可靠性高、数据基本不丢失、但性能消耗较大
-everysec 先放缓冲区，每秒写回，性能适中，宕机时丢失1秒内的数据
-no 放缓冲区，由操作系统控制写回，宕机时丢失数据较多
-redis 7功能 -> multi-part aof , base,incr,manifest
-aof 文件大小大于rdb，恢复速度慢于rdb
-aof重写机制：
-    auto-aof-rewrite-percentage
-    auto-aof-rewrite-min-size
-    读取一份原aof存为临时文件，新写入的操作放一份在缓冲区，然后一次性写入新的临时文件，原aof用临时文件替换 
-bgrewriteaof 手动重写命令
-aof-use-rdb-preamble yes # aof rdb混合
+redis.conf:
+    appendonly yes  # 输出appendonly.aof 文件
+    # 写回策略 
+    appendfsync always/everysec/no
+        # always 同步写回，可靠性高、数据基本不丢失、但性能消耗较大
+        # everysec 先放缓冲区，每秒写回，性能适中，宕机时丢失1秒内的数据
+        # no 放缓冲区，由操作系统控制写回，宕机时丢失数据较多
+    # aof重写机制：
+    auto-aof-rewrite-percentage 100%
+    auto-aof-rewrite-min-size 100MB
+
+redis 7功能 -> multi-part aof , base, incr,manifest
+ 
+重写aof: 
+    重写命令：bgrewriteaof
+    原理：遍历数据库中所有key，并生成全量命令写入一个临时aof文件，最后替换旧的aof文件，再将缓冲区的增量命令追加到新文件后面
+
 aof、rdb同时开启，aof优先级高于rdb
+
+优点：数据可靠性高，最多丢失一秒的数据，always策略可以不丢失数据；文件内容是文本格式，便于排查问题，可以修改错误命令。
+缺点：生产的日志文件较大，但是可以通过重写机制缩小文件；数据恢复速度较慢，10GB可能要几分钟
+
+#### RDB 和 AOF 混合持久化
+redis 4.0 引入混合持久化模式，是主流的生产环境选择
+redis.conf:
+    appendonly yes
+    aof-use-rdb-preamble yes
+
+原理：在重写aof流程上作修改，先将当前数据集以rdb格式写入文件头部，再将缓冲区的增量命令以aof的格式追加到尾部，
+    形成一个两段式的结构.文件内容以REDIS打头，表示rdb的部分。
+恢复过程：对于混合持久化文件，Redis会先加载RDB部分快速恢复基础数据，然后重放AOF尾部的增量命令，将数据恢复到最新状态
+
+优点：兼得了rdb和aof的优势，文件体积小、数据安全性高、恢复速度快
+
+阿里 tair，rdb 优化，企业版功能 tair-binlog，支持恢复到指定秒级时间点
+百度 混合持久化，aof中内置时间戳，可恢复到指定秒级 
 
 ### 错误恢复
 ./redis-check-aof --fix xxx.aof   # 修复aof
@@ -168,6 +195,8 @@ redis事务、redis aof机制、redis发布订阅
 ### redis复制 replica
 #### 主从:  
 slave -> master <- slave
+主节点的数据复制到从节点，主节点负责写操作，从节点负责读操作，实现数据冗余和负载均衡。
+
 ##### 配置文件指定
 从机上配置，redis.conf
     masterauth $password
@@ -191,23 +220,29 @@ slave -> master <- slave
 不需配置，在cli执行 slaveof xxx.xxx.xxx.xxx 6379
 重启server后失效
 
-##### 同步逻辑
-slave -> master 发送sync请求，
-master 执行rdb持久化
-master -> slaves 将rdb快照后缓存命令，完全同步到所有slave
-slave 收到rdb后存盘，并加载到内存
-心跳通信
-slave下线
-slave 恢复上线后，master检查backlog里的offset，将offset后面的数据同步复制给slave
+##### 主从同步逻辑
+第一次同步：
+    slave -> master 发送sync请求，
+    master 执行rdb持久化
+    master -> slaves 将rdb快照同步到slave
+    slave 清空数据，加载rdb
+    master 发送repl——baklog中的增量命令到slave
+    slave 执行增量命令
+    心跳通信
+    slave下线
+增量同步，或网络中断后：
+    slave 恢复上线后，master检查backlog里的offset，将offset后面的数据同步复制给slave
 
 ##### 缺点
-master 宕机后，slaves无法自动选住
-从节点复制会比较消耗主节点性能
+master 宕机后，slaves无法自动选主，需要手动切换
+从节点复制会比较消耗主节点性能，单主机主节点，写能力和存储能力比较受限
 
-#### 薪火相传
+##### 一主多从模式
+
+##### 薪火相传模式
 master <- slave <- slave
 
-#### 独立门户 
+##### 独立门户模式
 slaveof no one 
 
 ### 哨兵 sentinel
@@ -228,20 +263,21 @@ sentinel.conf
 
 模拟故障，一主二从，主故障
     master shutdown
-    sentinel 选出leader
+    sentinel 使用raft算法，选出leader
     sentinel leader 选举新的 master，其中一个从变成主
     sentinel leader 对新 master 执行 slaveof no one
     原主恢复，降级为slave. conf配置会被修改，增加 slaveof 等参数
     整个过程可能需要10秒或者更多
+    客户端通过哨兵获取当前主节点的地址
 
 sdown 主观下线，哨兵与master心跳超时 
 odown 客观下线，达到指定数量的哨兵认为master sdown
-sentinel 选举leader 使用 Raft 算法
-重新选主的规则，比较 priority -> replication offset -> run id(选小者)  （redis.conf slave-priority)
+重新选主的规则：
+    比较 priority -> replication offset -> run id(选小者)  （redis.conf slave-priority)
 
 ### redis 集群
-可以有多个master，比如三主三从。
-使用哈希槽，有16384个哈希槽
+通过数据分区和故障转移实现高可用和分布式存储，突破单机内存限制，节点间通过Gossip协议通信。可以有多个master，比如三主三从。
+使用哈希槽，有16384个哈希槽，通过哈希值取余来决定放到哪个节点哪个槽位
 分片 crc16算法
 
 1. 哈希取余
@@ -420,8 +456,10 @@ key的过期时间错开
 可能是自然过期
 
 解决方法：
-    1. 用户过期+逻辑过期。不设置过期时间或者过期时间长一点，增加一个过期字段，在查询数据是判断是否过期，如果过期则异步地更新数据。有数据不一致的窗口期。
-    2. 互斥锁，当发现缓存失效时，先去获得一个分布式锁，第一个拿到锁的请求去更新数据。 略微影响用户体验。
+    1. 用户过期+逻辑过期。不设置过期时间或者过期时间长一点，增加一个过期字段，再查询数据时判断是否过期，如果过期则异步地更新数据。性能较好，但有数据不一致的窗口期。
+    2. 互斥锁，当发现缓存失效时，先去获得一个分布式锁，第一个拿到锁的请求去更新数据。 数据强一致性，略微影响用户体验。
+    3. 不过期 + 后台定时刷新
+    4. 用redis计数，来对热点参数限流，当热key过期时，只允许部分请求穿过数据库，其余请求做服务降级处理
 
 ### redis 分布式锁
 独占性、高可用、防死锁、不乱抢、重入性、身份验证、可重试
@@ -472,14 +510,23 @@ redlock 性能较低
 3. 定期删除     定期抽检一部分key判断是否过期
 
 redis.conf  => [memory management] => 
-1. noeviction
-2. allkeys-lru
+1. noeviction  不淘汰、内存用满时，拒绝新的写入请求，返回错误
+2. allkeys-lru 
 3. volatile-lru
 4. allkeys-random
 5. volatile-random
 6. volatile-ttl
 7. allkeys-lfu
 8. volatile-lfu
+
+lru 最近最少使用
+    原理：并非严格的lru算法，而是在所有key中随机抽取一定数量的key，淘汰最后访问时间最早的那个。
+    因为lru算法需要维护一个有序链表来记录所有key的访问顺序，维护起来比较消耗性能
+    适合场景：热点数据随时间变化的场景
+lfu 最不经常使用
+    原理：用lfu_count 记录最近访问次数，用lfu_timer记录时间戳，定时（默认一分钟，lfu-decay-time)按时间差降低lfu_count，并更新lfu_timer为当前时间,淘汰lfu_count最小的key，如果lfu_count 一致，则淘汰最久未被访问的key
+    适合场景：热点数据长期稳定的场景
+
 根据业务场景选择合适的淘汰策略
 
 ### 源码分析
@@ -488,7 +535,7 @@ redis 6
     set -》 intset + hashtable  如果数据全为整数且长度有限，则使用intset，这样可以节省使用hashtable产生的指针等空间占用
     zset -》 skiplist + zipList  如果小于128个元素且大小都小于64字节，则使用ziplist
     list -》 quicklist + ziplist
-    hash -》 hashtable + ziplist 默认采用ziplist存储以节省内存，ziplist里面连续两个entry存储field和value，entry数量超过512或由一个entry大小超过64字节，则转为dict存储
+    hash -》 hashtable + ziplist 默认采用ziplist存储以节省内存，ziplist里面连续两个entry存储field和value，entry数量超过512或由一个entry大小超过64字节，则转为hashtable存储
 redis 7
     zset -》 skiplist + listpack
     list -》 quicklist
@@ -496,10 +543,11 @@ redis 7
 
 
 结构体：
-    SDS 简单动态字符串，可以动态扩容。因为C语言的字符串不适合使用（不可变、长度需要计算、非二进制安全），SDS 是一个结构体（字节数、申请总字节数、头类型、字符数组）
-    不同数据类型，采用不同的编码方式，对应不同的数据结构
-    debug object $key 查看编码方式、lru、内存地址、引用计数等
-    IntSet 保持整型元素、升序，结构体头部定义数字类型：分短整型、整型、长整型，如果数字超出范围，则动态升级数字类型，并把原先的数据拷贝到正确位置
+    SDS： 简单动态字符串，可以动态扩容。因为C语言的字符串不适合使用（不可变、长度需要计算、非二进制安全），SDS 是一个结构体（字节数、申请总字节数、头类型、字符数组）
+    IntSet： 保持整型元素、升序，结构体头部定义数字类型：分短整型、整型、长整型，如果数字超出范围，则动态升级数字类型，并把原先的数据拷贝到正确位置
+    hash类型：又包含了两个哈希表，还有数组和链表结构，小哈希表存储哈希表的各种信息和函数指针，用于实现渐进式rehash；指针数组，用于存储实际数据的指针，实际数据存储在dictEntry对象中，此对象中可能有一个指针指向下一个对象，此链表结构，用于解决hash冲突
+
+debug object $key 查看编码方式、lru、内存地址、引用计数等
 
 编码方式：
     string： int(长整型 64位有符号，长度小于20) ,embstr（小于44字节的字符串，浮点数也是用此编码）, raw（大于44字节） 
@@ -519,3 +567,30 @@ redis 基于Reactor模式开发的网络事件处理器
 BIO 需要多开线程处理多个客户端连接，缺点并发处理能力有限
 NIO 只需一个线程，将客户端连接放入容器，while循环遍历所有连接来收发数据，缺点比较耗费CPU资源
 IO多路复用 基于操作系统的epoll函数，基于事件驱动，将就绪的IO事件主动推送给应用，减少应用层面的资源消耗，提高了应用的吞吐能力
+
+### 渐进式rehash
+redis内部所有的key存在一个大的哈希表，当哈希表里面key的数量太多时，哈希冲突增多，链表长度过长，会影响查询效率
+所以当key的数据达到一定阈值，就要进行扩容，创建新的hash表，把key重新计算hash值，插入新的hash表，这个过程称为rehash。redis中的hash数据类型也会进行rehash
+当负载因子 >= 1, 且没有执行BGSAVE或BGREWRITEWAOF时，会进行扩容
+当负载因子 > 5， 会进行扩容
+当负载因子 < 0.1，会进行缩容
+hash表默认大小是4，每次扩容
+为了保证性能，采用渐进式rehash，每次增删改查时，进行rehash，新增key直接写入新的hash表，更新key会rehash写入新表，并同一个桶中的key也会一起写入新表。
+定时rehash，为了业务空闲，很多key可能不会被访问，所以redis后台会定时rehash，每次rehash指定数量key，比如100个
+
+
+
+
+1. redis 快的原因
+2. redis 五个基本数据类型，string、list、hash、set、zset，还有GEO、hyperloglog、bitmap
+3. redis 底层数据结构： SDS（int、embstr、raw），quicklist、ziplist、listpack、skiplist、hashtable、linkedlist
+4. redis 主从复制
+5. redis 哨兵 sentinel集群，raft算法选举leader，选举新master的原则
+6. redis 集群
+7. redis 分布式锁
+8. redis 缓存穿透、缓存雪崩、缓存击穿
+9. redis 实现秒杀业务，判断能否下单和下单两个操作分离
+10. redis 发布订阅
+11. pipeline批处理、stream消息队列
+12. IO多路复用实现高并发
+13. redis持久化机制，rdb、aof， 混合持久化的优势特点
