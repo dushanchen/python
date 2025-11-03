@@ -2,7 +2,9 @@ import asyncio
 
 
 '''
-    协程, 轻量级线程，特别适合处理I/O密集型任务
+    协程, 轻量级线程，可以在函数间自由切换运行。
+    跟线程的区别：线程切换是由系统调度，涉及到内核态到用户态的转换，开销大，MB级别，携程切换可以由程序员调度，由于共用一个线程，切换开销小，KB级别。
+    特别适合处理I/O密集型任务
     内存占用小，单线程可以运行数万个协程
 '''
 
@@ -170,10 +172,36 @@ async def main():
 asyncio.run(main())
 
 
+print("6. 调用阻塞io")
+import requests
+
+loop = asyncio.get_event_loop()
+url = 'www.baidu.com'
+async def run_blocking_io():
+    # 使用 run_in_executor 默认线程池来运行一个阻塞操作
+    resp = await loop.run_in_executor(None, requests.get, url)
+    print(resp)
+
+loop.close()
+
+print("7. 异步迭代器")
+# 实现__aiter__方法
+
+print("8. 异步上下文管理器")
+# 实现 __aenter__、__aexit__方法
+
+print("9. uvloop")
+# 使用uvloop 替用asyncio 默认的循环； uvicorn内部使用的就是uvloop
+    
 # 协程同步
 # asyncio.Semaphore()
 # asyncio.Lock()
 # asyncio.Event()
 # asyncio.Condition()
 # asyncio.Barrier()
-import numpy
+
+# 10. 使用numpy、pands等同步类库
+# 1）绝不直接在 async def 视图中调用同步阻塞函数。
+# 2）使用 asyncio.to_thread (Python 3.9+) 或 loop.run_in_executor（3.7、3.8） 将同步代码包装起来。
+# 3）将所有相关的同步操作打包到一个函数中，然后一次性提交到线程池，以减少线程切换的开销。
+# 4）对于重度使用场景，考虑创建自定义线程池以控制并发度和资源消耗。
