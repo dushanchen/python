@@ -1,21 +1,12 @@
-def example():
-    value = yield 2
-    print("get", value)
-    value2 = yield 3
-    print("get2,", value2)
-    return value
-
-g = example()
-# 使用send(None)启动生成器，我们应该会得到 2
-got = g.send(None)
-print(got)  # 2
-
-try:
-    # 再次启动 会显示 "get 4", 就是我们传入的值
-    got = g.send(got*2)
-    print("got: ", got)
-    got = g.send(got*3)
-    print("got2, ", got)
-except StopIteration as e:
-    # 生成器运行完成，将会print(4)，e.value 是生成器return的值
-    print(e.value)
+def coroutine_example():
+    while True:
+        x = yield  # 接收外部发送的值
+        print("Received:", x)
+        return 'world'
+    
+    
+co = coroutine_example()
+next(co)  # 启动协程
+next(co)  # 启动协程
+# co.send("Hello")  # 输出: Received: Hello
+# co.send()  # 输出: Received: Hello

@@ -69,13 +69,11 @@ def fetch(url):
 start = time.time()
 with ThreadPoolExecutor(max_workers=5) as pool:
     result = list(pool.map(fetch, urls))
-    print(result)
 print("thread pool fetches %s urls, use %s sec." % (num, time.time() - start))
 
 start = time.time()
 for i in urls:
     resp = fetch(i)
-    print(resp)
 print("synchronously fetch %s urls, use %s sec." % (num, time.time() - start))
 print("多线程适合io密集场景")
 
