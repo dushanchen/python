@@ -58,7 +58,7 @@ class MessaageQueue:
     def __init__(self):
         self.msg_queue = Queue(maxsize=10)
         self.condition = Condition()
-    
+        
     def produce(self, item):
         with self.condition:
             while self.msg_queue.full():
